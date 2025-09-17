@@ -1,0 +1,4 @@
+[Application]
+name=org.glideapp.GlideApp
+runtime=org.kde.Platform/x86_64/6.9
+sdk=org.kde.Sdk/x86_64/6.9

@@ -1,0 +1,35 @@
+{
+  "id" : "org.glideapp.GlideApp",
+  "runtime" : "org.kde.Platform",
+  "runtime-version" : "6.9",
+  "runtime-commit" : "acbed8fd796d13cfc6a9abb3c2d32147061a05fedaeb78a9c10c0b0b622982b8",
+  "sdk" : "org.kde.Sdk",
+  "sdk-commit" : "64a2b785227285d46a0001727a09d683ee93e07391fc9268bebf8c416b3c186e",
+  "command" : "glide_gui",
+  "modules" : [
+    {
+      "name" : "glideapp",
+      "buildsystem" : "cmake",
+      "config-opts" : [
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=/app",
+        "-DQT_SELECT_VERSION=6"
+      ],
+      "sources" : [
+        {
+          "path" : ".",
+          "type" : "dir"
+        }
+      ]
+    }
+  ],
+  "finish-args" : [
+    "--share=ipc",
+    "--socket=x11",
+    "--socket=pulseaudio",
+    "--device=all",
+    "--share=network",
+    "--filesystem=home"
+  ],
+  "source-date-epoch" : 1758062173
+}

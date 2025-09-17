@@ -1,0 +1,25 @@
+[Application]
+name=org.glideapp.GlideApp
+runtime=org.kde.Platform/x86_64/6.9
+sdk=org.kde.Sdk/x86_64/6.9
+command=glide_gui
+
+[Context]
+shared=network;ipc;
+sockets=x11;pulseaudio;
+devices=all;
+filesystems=home;xdg-config/kdeglobals:ro;
+
+[Session Bus Policy]
+com.canonical.AppMenu.Registrar=talk
+org.kde.kconfig.notify=talk
+org.kde.KGlobalSettings=talk
+org.kde.kdeconnect=talk
+
+[Extension org.glideapp.GlideApp.Debug]
+directory=lib/debug
+autodelete=true
+no-autodownload=true
+
+[Build]
+built-extensions=org.glideapp.GlideApp.Debug;

@@ -1,0 +1,5 @@
+[Runtime]
+name=org.glideapp.GlideApp.Debug
+
+[ExtensionOf]
+ref=app/org.glideapp.GlideApp/x86_64/master
