@@ -18,11 +18,12 @@ Makefile
 *.ui.h
 *.qrc.cpp
 *.rcc
-*.ts
-*.qm
 moc_*.cpp
 ui_*.h
 qrc_*.cpp
+
+# Generated Qt translations
+translations/*.qm
 
 # Binaries
 *.exe
@@ -32,7 +33,28 @@ qrc_*.cpp
 *.a
 *.lib
 
+# Executables (no extension)
+server
+client
+glide_gui
+test_*
+
+# Flatpak builds
+flatpak_build/
+repo/
+
+# vcpkg installations (only track json, not builds)
+/vcpkg/
+/vcpkg.*/*
+!vcpkg.json
+
 # OS generated files
 .DS_Store
 .Trashes
 Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
