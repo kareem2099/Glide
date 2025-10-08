@@ -5,7 +5,20 @@
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <chrono>
 #include "constants.h"
+#include "encryption_manager.h" // For encryption
+#include "client_input_injection.h" // For input injection functions
+#include "utils.h" // For utility functions
+
+// Global encryption manager instance for client
+EncryptionManager g_encryptionManager;
+// Flag to indicate if encryption is active
+bool g_isEncrypted = false;
+// Flag to indicate if server is connected
+bool g_serverConnected = false;
+// Server address for communication
+struct sockaddr_in g_serverAddr;
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -23,123 +36,6 @@
     #include <X11/cursorfont.h>
 #endif
 
-bool controlling_local_screen = true;
-
-#ifdef _WIN32
-void inject_input_windows(const std::string& message) {
-    INPUT input;
-    memset(&input, 0, sizeof(INPUT));
-
-    if (message.rfind(Constants::InputMessages::SCREEN_EXIT, 0) == 0) {
-        controlling_local_screen = true;
-        SetCursor(LoadCursor(NULL, IDC_ARROW));
-        std::cout << "Client: Taking control, showing cursor." << std::endl;
-    } else if (message.rfind(Constants::InputMessages::SCREEN_ENTER, 0) == 0) {
-        controlling_local_screen = false;
-        SetCursor(NULL);
-        std::cout << "Client: Releasing control, hiding cursor." << std::endl;
-    } else if (!controlling_local_screen) {
-        if (message.rfind(Constants::InputMessages::KEY_PRESS, 0) == 0) {
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = std::stoi(message.substr(Constants::InputMessages::KEY_PRESS.length()));
-            input.ki.dwFlags = 0;
-            SendInput(1, &input, sizeof(INPUT));
-        } else if (message.rfind(Constants::InputMessages::KEY_RELEASE, 0) == 0) {
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = std::stoi(message.substr(Constants::InputMessages::KEY_RELEASE.length()));
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, &input, sizeof(INPUT));
-        } else if (message.rfind(Constants::InputMessages::MOUSE_MOVE, 0) == 0) {
-            std::string coords_str = message.substr(Constants::InputMessages::MOUSE_MOVE.length());
-            size_t comma_pos = coords_str.find(',');
-            if (comma_pos != std::string::npos) {
-                int x = std::stoi(coords_str.substr(0, comma_pos));
-                int y = std::stoi(coords_str.substr(comma_pos + 1));
-                SetCursorPos(x, y);
-            }
-        } else if (message.rfind(Constants::InputMessages::MOUSE_PRESS, 0) == 0) {
-            int button = std::stoi(message.substr(Constants::InputMessages::MOUSE_PRESS.length()));
-            input.type = INPUT_MOUSE;
-            if (button == 1) input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-            else if (button == 2) input.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
-            else if (button == 3) input.mi.dwFlags = MOUSEEVENTF_MIDDLEDOWN;
-            SendInput(1, &input, sizeof(INPUT));
-        } else if (message.rfind(Constants::InputMessages::MOUSE_RELEASE, 0) == 0) {
-            int button = std::stoi(message.substr(Constants::InputMessages::MOUSE_RELEASE.length()));
-            input.type = INPUT_MOUSE;
-            if (button == 1) input.mi.dwFlags = MOUSEEVENTF_LEFTUP;
-            else if (button == 2) input.mi.dwFlags = MOUSEEVENTF_RIGHTUP;
-            else if (button == 3) input.mi.dwFlags = MOUSEEVENTF_MIDDLEUP;
-            SendInput(1, &input, sizeof(INPUT));
-        } else if (message.rfind(Constants::InputMessages::MOUSE_SCROLL, 0) == 0) {
-            std::string scroll_dir = message.substr(Constants::InputMessages::MOUSE_SCROLL.length());
-            input.type = INPUT_MOUSE;
-            input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-            input.mi.mouseData = (scroll_dir == Constants::InputMessages::MOUSE_SCROLL_UP) ? WHEEL_DELTA : -WHEEL_DELTA;
-            SendInput(1, &input, sizeof(INPUT));
-        }
-    }
-}
-#else
-void inject_input_linux(const std::string& message) {
-    Display *display = XOpenDisplay(nullptr);
-    if (!display) {
-        std::cerr << "Error: Could not open X display." << std::endl;
-        return;
-    }
-
-    Window root = DefaultRootWindow(display);
-
-    if (message.rfind(Constants::InputMessages::SCREEN_EXIT, 0) == 0) {
-        controlling_local_screen = true;
-        XDefineCursor(display, root, XCreateFontCursor(display, XC_left_ptr));
-        XFlush(display);
-        std::cout << "Client: Taking control, showing cursor." << std::endl;
-    } else if (message.rfind(Constants::InputMessages::SCREEN_ENTER, 0) == 0) {
-        controlling_local_screen = false;
-        XDefineCursor(display, root, XCreateFontCursor(display, 0));
-        XFlush(display);
-        std::cout << "Client: Releasing control, hiding cursor." << std::endl;
-    } else if (!controlling_local_screen) {
-        if (message.rfind(Constants::InputMessages::KEY_PRESS, 0) == 0) {
-            std::string key_str = message.substr(Constants::InputMessages::KEY_PRESS.length());
-            KeySym key_sym = XStringToKeysym(key_str.c_str());
-            if (key_sym != NoSymbol) {
-                KeyCode key_code = XKeysymToKeycode(display, key_sym);
-                XTestFakeKeyEvent(display, key_code, True, CurrentTime);
-                XFlush(display);
-            }
-        } else if (message.rfind(Constants::InputMessages::KEY_RELEASE, 0) == 0) {
-            std::string key_str = message.substr(Constants::InputMessages::KEY_RELEASE.length());
-            KeySym key_sym = XStringToKeysym(key_str.c_str());
-            if (key_sym != NoSymbol) {
-                KeyCode key_code = XKeysymToKeycode(display, key_sym);
-                XTestFakeKeyEvent(display, key_code, False, CurrentTime);
-                XFlush(display);
-            }
-        } else if (message.rfind(Constants::InputMessages::MOUSE_MOVE, 0) == 0) {
-            std::string coords_str = message.substr(Constants::InputMessages::MOUSE_MOVE.length());
-            size_t comma_pos = coords_str.find(',');
-            if (comma_pos != std::string::npos) {
-                int x = std::stoi(coords_str.substr(0, comma_pos));
-                int y = std::stoi(coords_str.substr(comma_pos + 1));
-                XTestFakeMotionEvent(display, -1, x, y, CurrentTime);
-                XFlush(display);
-            }
-        } else if (message.rfind(Constants::InputMessages::MOUSE_PRESS, 0) == 0) {
-            int button = std::stoi(message.substr(Constants::InputMessages::MOUSE_PRESS.length()));
-            XTestFakeButtonEvent(display, button, True, CurrentTime);
-            XFlush(display);
-        } else if (message.rfind(Constants::InputMessages::MOUSE_RELEASE, 0) == 0) {
-            int button = std::stoi(message.substr(Constants::InputMessages::MOUSE_RELEASE.length()));
-            XTestFakeButtonEvent(display, button, False, CurrentTime);
-            XFlush(display);
-        }
-    }
-
-    XCloseDisplay(display);
-}
-#endif
 
 int main(int argc, char const *argv[]) {
     if (argc < 2) {
@@ -150,81 +46,202 @@ int main(int argc, char const *argv[]) {
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed." << std::endl;
+        Utils::logError("main", "WSAStartup failed");
         return 1;
     }
 
     SOCKET udpSocket = socket(AF_INET, SOCK_DGRAM, 0);
     if (udpSocket == INVALID_SOCKET) {
-        std::cerr << "UDP socket creation failed: " << WSAGetLastError() << std::endl;
+        Utils::logError("main", "UDP socket creation failed");
         WSACleanup();
         return 1;
     }
 
+    // Setup server address for sending responses
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(Constants::Network::UDP_PORT);
+    if (inet_pton(AF_INET, argv[1], &serverAddr.sin_addr) != 1) {
+        Utils::logError("main", "Invalid server IP address: " + std::string(argv[1]));
+        closesocket(udpSocket);
+        WSACleanup();
+        return 1;
+    }
+    g_serverAddr = serverAddr;
+
+    // Bind to local port for receiving
     sockaddr_in localAddr{};
     localAddr.sin_family = AF_INET;
     localAddr.sin_port = htons(Constants::Network::UDP_PORT);
     localAddr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(udpSocket, (sockaddr*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR) {
-        std::cerr << "Bind failed: " << WSAGetLastError() << std::endl;
+        Utils::logError("main", "Bind failed");
         closesocket(udpSocket);
         WSACleanup();
         return 1;
     }
 
-    std::cout << "Client listening for input events on port " << Constants::Network::UDP_PORT << " via UDP.\n";
+    Utils::logMessage(Constants::LogTypes::INFO, 
+                     "Client listening on port " + std::to_string(Constants::Network::UDP_PORT));
 
     char buffer[Constants::Network::BUFFER_SIZE];
+    struct sockaddr_in fromAddr;
+    int fromLen = sizeof(fromAddr);
+
     while (true) {
         memset(buffer, 0, Constants::Network::BUFFER_SIZE);
-        int len = recvfrom(udpSocket, buffer, sizeof(buffer) - 1, 0, nullptr, nullptr);
+        int len = recvfrom(udpSocket, buffer, sizeof(buffer) - 1, 0, 
+                          (sockaddr*)&fromAddr, &fromLen);
+        
         if (len > 0) {
             buffer[len] = '\0';
             std::string received_message(buffer);
-            std::cout << "Received: " << received_message << std::endl;
-            inject_input_windows(received_message);
+            
+            Utils::logDebug("Client received: " + received_message);
+
+            // Handle key exchange messages
+            if (Utils::startsWith(received_message, Constants::EncryptionMessages::DH_PARAMS)) {
+                std::string dh_params_pem = Utils::extractMessageData(received_message);
+                
+                if (g_encryptionManager.setDhParamsPem(dh_params_pem)) {
+                    if (g_encryptionManager.generateDhKeyPair()) {
+                        // Send our public key back to server
+                        std::string public_key_pem = g_encryptionManager.getDhPublicKeyPem();
+                        std::string response_message = Constants::EncryptionMessages::DH_PUBLIC_KEY + public_key_pem;
+                        
+                        if (Utils::sendSecureMessage(udpSocket, fromAddr, response_message, 
+                                                   g_encryptionManager, false)) {
+                            Utils::logMessage(Constants::LogTypes::INFO, "Sent public key to server");
+                            g_serverAddr = fromAddr; // Update server address
+                        }
+                    }
+                }
+            }
+            // Handle key exchange completion
+            else if (Utils::startsWith(received_message, Constants::EncryptionMessages::KEY_EXCHANGE_COMPLETE)) {
+                g_isEncrypted = true;
+                g_serverConnected = true;
+                Utils::logMessage(Constants::LogTypes::SUCCESS, "Key exchange completed, encryption active");
+            }
+            // Handle encrypted input messages
+            else if (Utils::startsWith(received_message, Constants::EncryptionMessages::ENCRYPTED_DATA)) {
+                if (g_isEncrypted) {
+                    std::string encrypted_data = Utils::extractMessageData(received_message);
+                    std::vector<unsigned char> decoded_data = Utils::base64_decode(encrypted_data);
+                    std::string decrypted_message = g_encryptionManager.decrypt(decoded_data);
+                    
+                    if (!decrypted_message.empty()) {
+                        inject_input_windows(decrypted_message, g_encryptionManager, g_isEncrypted);
+                    }
+                }
+            }
+            // Handle unencrypted input messages (during initial setup)
+            else if (!g_isEncrypted) {
+                inject_input_windows(received_message, g_encryptionManager, g_isEncrypted);
+            }
         } else if (len == 0) {
-            std::cout << "Server disconnected.\n";
+            Utils::logMessage(Constants::LogTypes::WARNING, "Server disconnected");
             break;
         } else {
-            std::cerr << "recvfrom failed: " << WSAGetLastError() << std::endl;
+            Utils::logError("main", "recvfrom failed");
             break;
         }
     }
 
     closesocket(udpSocket);
     WSACleanup();
-#else
+
+#else // Linux
     int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_sock < 0) {
-        std::cerr << "UDP socket creation error" << std::endl;
+        Utils::logError("main", "UDP socket creation failed");
         return 1;
     }
 
+    // Setup server address for sending responses
+    struct sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(Constants::Network::UDP_PORT);
+    if (inet_pton(AF_INET, argv[1], &server_addr.sin_addr) != 1) {
+        Utils::logError("main", "Invalid server IP address: " + std::string(argv[1]));
+        close(udp_sock);
+        return 1;
+    }
+    g_serverAddr = server_addr;
+
+    // Bind to local port for receiving
     struct sockaddr_in local_udp_addr{};
     local_udp_addr.sin_family = AF_INET;
     local_udp_addr.sin_port = htons(Constants::Network::UDP_PORT);
     local_udp_addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(udp_sock, (struct sockaddr *)&local_udp_addr, sizeof(local_udp_addr)) < 0) {
-        perror("UDP bind failed");
+        Utils::logError("main", "UDP bind failed");
+        close(udp_sock);
         return 1;
     }
 
-    std::cout << "Client listening for input events on port " << Constants::Network::UDP_PORT << " via UDP.\n";
+    Utils::logMessage(Constants::LogTypes::INFO, 
+                     "Client listening on port " + std::to_string(Constants::Network::UDP_PORT));
 
     char udp_buffer[Constants::Network::BUFFER_SIZE] = {0};
+    struct sockaddr_in fromAddr;
+    socklen_t fromLen = sizeof(fromAddr);
+
     while (true) {
         memset(udp_buffer, 0, Constants::Network::BUFFER_SIZE);
-        ssize_t valread = recvfrom(udp_sock, udp_buffer, Constants::Network::BUFFER_SIZE, 0, nullptr, nullptr);
+        ssize_t valread = recvfrom(udp_sock, udp_buffer, Constants::Network::BUFFER_SIZE, 0, 
+                                  (struct sockaddr*)&fromAddr, &fromLen);
+        
         if (valread <= 0) {
-            std::cout << "Server disconnected or error." << std::endl;
+            Utils::logMessage(Constants::LogTypes::WARNING, "Server disconnected or error");
             break;
         }
+        
         std::string received_message(udp_buffer);
-        std::cout << "Received: " << received_message << std::endl;
-        inject_input_linux(received_message);
+        Utils::logDebug("Client received: " + received_message);
+
+        // Handle key exchange messages
+        if (Utils::startsWith(received_message, Constants::EncryptionMessages::DH_PARAMS)) {
+            std::string dh_params_pem = Utils::extractMessageData(received_message);
+            
+            if (g_encryptionManager.setDhParamsPem(dh_params_pem)) {
+                if (g_encryptionManager.generateDhKeyPair()) {
+                    // Send our public key back to server
+                    std::string public_key_pem = g_encryptionManager.getDhPublicKeyPem();
+                    std::string response_message = Constants::EncryptionMessages::DH_PUBLIC_KEY + public_key_pem;
+                    
+                    if (Utils::sendSecureMessage(udp_sock, fromAddr, response_message, 
+                                               g_encryptionManager, false)) {
+                        Utils::logMessage(Constants::LogTypes::INFO, "Sent public key to server");
+                        g_serverAddr = fromAddr; // Update server address
+                    }
+                }
+            }
+        }
+        // Handle key exchange completion
+        else if (Utils::startsWith(received_message, Constants::EncryptionMessages::KEY_EXCHANGE_COMPLETE)) {
+            g_isEncrypted = true;
+            g_serverConnected = true;
+            Utils::logMessage(Constants::LogTypes::SUCCESS, "Key exchange completed, encryption active");
+        }
+        // Handle encrypted input messages
+        else if (Utils::startsWith(received_message, Constants::EncryptionMessages::ENCRYPTED_DATA)) {
+            if (g_isEncrypted) {
+                std::string encrypted_data = Utils::extractMessageData(received_message);
+                std::vector<unsigned char> decoded_data = Utils::base64_decode(encrypted_data);
+                std::string decrypted_message = g_encryptionManager.decrypt(decoded_data);
+                
+                if (!decrypted_message.empty()) {
+                    inject_input_linux(decrypted_message, g_encryptionManager, g_isEncrypted);
+                }
+            }
+        }
+        // Handle unencrypted input messages (during initial setup)
+        else if (!g_isEncrypted) {
+            inject_input_linux(received_message, g_encryptionManager, g_isEncrypted);
+        }
     }
 
     close(udp_sock);

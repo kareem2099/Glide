@@ -37,6 +37,7 @@ private:
     void setupGeneralTab();
     void setupNetworkingTab();
     void setupLoggingTab();
+    void setupDeviceRoleGroupUI(QVBoxLayout* parentLayout); // New helper for device role
     void loadSettings();
     
     QSettings* m_settings;
@@ -49,6 +50,7 @@ private:
     QCheckBox* m_minimizeToTrayCheckBox;
     QCheckBox* m_hideOnStartupCheckBox;
     QCheckBox* m_startGlideOnStartupCheckBox;
+    QComboBox* m_deviceRoleComboBox; // New UI element for device role selection
 
     // Networking Tab UI elements
     QSpinBox* m_portSpinBox;

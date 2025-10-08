@@ -1,0 +1,27 @@
+{
+  "name": "glideapp",
+  "version": "1.0.0",
+  "description": "Cross-platform input sharing application",
+  "dependencies": [
+    "qt6-base",
+    "qt6-tools",
+    "openssl",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ],
+  "features": {
+    "translations": {
+      "description": "Qt Linguist tools for translations",
+      "dependencies": [
+        "qt6-tools"
+      ]
+    }
+  },
+  "builtin-baseline": "baseline.json"
+}

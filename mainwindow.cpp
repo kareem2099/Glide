@@ -6,6 +6,7 @@
 #include <QFileDialog> // Added for file dialog
 #include <thread> // Added for std::thread
 #include "file_transfer.h" // Include for file transfer functions
+#include "file_transfer_improvements.h" // Include enhanced file transfer
 #include "constants.h"
 #include <QIcon> // Added for QIcon
 #include "settingsdialog.h" // Include the new settings dialog
@@ -22,6 +23,12 @@ GlideMainWindow::GlideMainWindow(QWidget *parent)
     , m_connectedClients(0)
     , m_settings(new QSettings(QString::fromStdString(Constants::APP_NAME), QString::fromStdString(Constants::SETTINGS_FILE_NAME), this))
     , m_translator(nullptr) // Initialize translator
+    , m_clipboardSyncManager(new ClipboardSyncManager(this)) // Initialize ClipboardSyncManager
+    , m_deviceDiscovery(DeviceDiscovery::instance()) // Initialize DeviceDiscovery
+    , m_discoveredDevicesList(nullptr)
+    , m_discoverDevicesBtn(nullptr)
+    , m_connectionWizardBtn(nullptr)
+    , m_discoveryStatusLabel(nullptr)
 {
     setWindowTitle(tr(Constants::APP_NAME.c_str()) + " - " + tr("Cross-Device Input Sharing"));
     setWindowIcon(QIcon(":/icons/Glide.png")); // You'll need to add this resource
@@ -31,6 +38,7 @@ GlideMainWindow::GlideMainWindow(QWidget *parent)
     setupUI();
     setupTrayIcon();
     loadSettings();
+    updateUIBasedOnRole(); // Call to update UI based on loaded role
     
     // Setup timers
     m_statusTimer = new QTimer(this);
@@ -42,6 +50,11 @@ GlideMainWindow::GlideMainWindow(QWidget *parent)
     
     logMessage(tr("%1 initialized successfully").arg(QString::fromStdString(Constants::APP_NAME)));
     logMessage(tr("Local IP: %1").arg(getLocalIPAddress()));
+
+    // Connect clipboard sync manager signal
+    connect(m_clipboardSyncManager, &ClipboardSyncManager::clipboardTextChanged,
+            this, &GlideMainWindow::onClipboardDataReceivedAndSend);
+    m_clipboardSyncManager->startMonitoring(); // Start monitoring clipboard changes
 }
 
 GlideMainWindow::~GlideMainWindow()
@@ -68,9 +81,10 @@ void GlideMainWindow::setupUI()
     setupServerGroupUI(contentLayout);
     setupClientGroupUI(contentLayout);
     setupFileTransferGroupUI(contentLayout);
-    
+    setupDeviceDiscoveryGroupUI(contentLayout);
+
     mainLayout->addLayout(contentLayout);
-    
+
     setupLogGroupUI(mainLayout);
     
     // Status bar
@@ -87,7 +101,23 @@ void GlideMainWindow::setupUI()
     connect(m_connectBtn, &QPushButton::clicked, this, &GlideMainWindow::connectToServer);
     connect(m_disconnectBtn, &QPushButton::clicked, this, &GlideMainWindow::disconnectFromServer);
     connect(m_browseFileBtn, &QPushButton::clicked, this, &GlideMainWindow::browseFile);
-    connect(m_sendFileBtn, &QPushButton::clicked, this, &GlideMainWindow::sendFile);
+    connect(m_sendFileBtn, &QPushButton::clicked, this, &GlideMainWindow::sendFileEnhanced);
+    connect(m_analyzeNetworkBtn, &QPushButton::clicked, this, &GlideMainWindow::analyzeNetwork);
+
+    // Add a checkbox for enabling/disabling clipboard sync
+    QCheckBox* clipboardSyncCheckBox = new QCheckBox(tr("Enable Clipboard Sync"));
+    clipboardSyncCheckBox->setChecked(m_settings->value("clipboard/enabled", true).toBool());
+    connect(clipboardSyncCheckBox, &QCheckBox::toggled, [this](bool checked) {
+        m_settings->setValue("clipboard/enabled", checked);
+        if (checked) {
+            m_clipboardSyncManager->startMonitoring();
+            logMessage(tr("Clipboard synchronization enabled."));
+        } else {
+            m_clipboardSyncManager->stopMonitoring();
+            logMessage(tr("Clipboard synchronization disabled."));
+        }
+    });
+    mainLayout->addWidget(clipboardSyncCheckBox);
 }
 
 void GlideMainWindow::setupServerGroupUI(QHBoxLayout* mainLayout)
@@ -155,10 +185,32 @@ void GlideMainWindow::setupClientGroupUI(QHBoxLayout* mainLayout)
 
 void GlideMainWindow::setupFileTransferGroupUI(QHBoxLayout* mainLayout)
 {
-    m_fileTransferGroup = new QGroupBox(tr("📁 File Transfer"), this);
+    m_fileTransferGroup = new QGroupBox(tr("📁 Enhanced File Transfer"), this);
     m_fileTransferGroup->setStyleSheet("QGroupBox { font-weight: bold; font-size: 14px; }");
     QVBoxLayout* fileTransferLayout = new QVBoxLayout(m_fileTransferGroup);
 
+    // Transfer mode selection
+    QHBoxLayout* modeLayout = new QHBoxLayout();
+    modeLayout->addWidget(new QLabel(tr("Transfer Mode:")));
+    m_transferModeCombo = new QComboBox();
+    m_transferModeCombo->addItem(tr("Auto-Optimized"), static_cast<int>(TransferMode::HYBRID_ADAPTIVE));
+    m_transferModeCombo->addItem(tr("Standard TCP"), static_cast<int>(TransferMode::TCP_STANDARD));
+    m_transferModeCombo->addItem(tr("UDP Accelerated"), static_cast<int>(TransferMode::UDP_ACCELERATED));
+    m_transferModeCombo->addItem(tr("Parallel TCP"), static_cast<int>(TransferMode::TCP_PARALLEL));
+    m_transferModeCombo->setCurrentIndex(0); // Default to auto-optimized
+    modeLayout->addWidget(m_transferModeCombo);
+
+    m_analyzeNetworkBtn = new QPushButton(tr("Analyze Network"));
+    m_analyzeNetworkBtn->setStyleSheet("QPushButton { background-color: #607D8B; color: white; font-weight: bold; padding: 6px; }");
+    modeLayout->addWidget(m_analyzeNetworkBtn);
+    fileTransferLayout->addLayout(modeLayout);
+
+    // Network status display
+    m_networkStatusLabel = new QLabel(tr("Network: Not analyzed"));
+    m_networkStatusLabel->setStyleSheet("QLabel { color: gray; font-style: italic; }");
+    fileTransferLayout->addWidget(m_networkStatusLabel);
+
+    // File selection
     QHBoxLayout* filePathLayout = new QHBoxLayout();
     m_filePathEdit = new QLineEdit();
     m_filePathEdit->setPlaceholderText(tr("Path to file to send..."));
@@ -167,9 +219,20 @@ void GlideMainWindow::setupFileTransferGroupUI(QHBoxLayout* mainLayout)
     filePathLayout->addWidget(m_browseFileBtn);
     fileTransferLayout->addLayout(filePathLayout);
 
-    m_sendFileBtn = new QPushButton(tr("Send File (TCP)"));
+    // Transfer controls
+    QHBoxLayout* transferControls = new QHBoxLayout();
+    m_sendFileBtn = new QPushButton(tr("🚀 Send File"));
     m_sendFileBtn->setStyleSheet("QPushButton { background-color: #FF9800; color: white; font-weight: bold; padding: 8px; }");
-    fileTransferLayout->addWidget(m_sendFileBtn);
+    transferControls->addWidget(m_sendFileBtn);
+
+    QPushButton* cancelBtn = new QPushButton(tr("Cancel"));
+    cancelBtn->setStyleSheet("QPushButton { background-color: #f44336; color: white; font-weight: bold; padding: 8px; }");
+    cancelBtn->setEnabled(false);
+    transferControls->addWidget(cancelBtn);
+    fileTransferLayout->addLayout(transferControls);
+
+    // Enhanced progress display
+    setupTransferProgressUI(fileTransferLayout);
 
     mainLayout->addWidget(m_fileTransferGroup);
 }
@@ -229,6 +292,12 @@ void GlideMainWindow::setupTrayIcon()
 
 void GlideMainWindow::startServer()
 {
+    if (m_deviceRole != "Server") {
+        logMessage(tr("Cannot start server: Application is not in Server mode."), QString::fromStdString(Constants::LogTypes::WARNING));
+        QMessageBox::warning(this, tr("Warning"), tr("Application is not in Server mode. Please change the device role in settings."));
+        return;
+    }
+
     if (m_serverProcess && m_serverProcess->state() == QProcess::Running) {
         return;
     }
@@ -280,6 +349,11 @@ void GlideMainWindow::startServer()
 
 void GlideMainWindow::stopServer()
 {
+    if (m_deviceRole != "Server") {
+        logMessage(tr("Cannot stop server: Application is not in Server mode."), QString::fromStdString(Constants::LogTypes::WARNING));
+        return;
+    }
+
     if (m_serverProcess && m_serverProcess->state() == QProcess::Running) {
         logMessage("Stopping server...");
         m_serverProcess->terminate();
@@ -301,6 +375,12 @@ void GlideMainWindow::stopServer()
 
 void GlideMainWindow::connectToServer()
 {
+    if (m_deviceRole != "Client") {
+        logMessage(tr("Cannot connect to server: Application is not in Client mode."), QString::fromStdString(Constants::LogTypes::WARNING));
+        QMessageBox::warning(this, tr("Warning"), tr("Application is not in Client mode. Please change the device role in settings."));
+        return;
+    }
+
     QString serverIP = m_serverIPEdit->text().trimmed();
     if (serverIP.isEmpty()) {
         QMessageBox::warning(this, tr("Warning"), tr("Please enter a server IP address!"));
@@ -350,6 +430,11 @@ void GlideMainWindow::connectToServer()
 
 void GlideMainWindow::disconnectFromServer()
 {
+    if (m_deviceRole != "Client") {
+        logMessage(tr("Cannot disconnect from server: Application is not in Client mode."), QString::fromStdString(Constants::LogTypes::WARNING));
+        return;
+    }
+
     if (m_clientProcess && m_clientProcess->state() == QProcess::Running) {
         logMessage("Disconnecting from server...");
         m_clientProcess->terminate();
@@ -402,6 +487,14 @@ void GlideMainWindow::sendFile()
         // Log completion or error back on the main thread if needed
         // QMetaObject::invokeMethod(this, [this]() { logMessage("File transfer complete/failed."); });
     }).detach();
+}
+
+void GlideMainWindow::onClipboardDataReceivedAndSend(const QString& text)
+{
+    logMessage(tr("Clipboard data changed: %1").arg(text.left(50) + (text.length() > 50 ? "..." : "")));
+    // Here, you would send the clipboard data over the network to other devices.
+    // For now, we just log it.
+    // Example: sendNetworkMessage(Constants::ClipboardMessages::CLIPBOARD_DATA + text.toStdString());
 }
 
 
@@ -484,6 +577,7 @@ QString GlideMainWindow::getLocalIPAddress()
 void GlideMainWindow::loadSettings()
 {
     m_serverIPEdit->setText(m_settings->value(Constants::SettingsKeys::CLIENT_SERVER_IP, "").toString());
+    m_deviceRole = m_settings->value(Constants::SettingsKeys::DEVICE_ROLE, "Client").toString(); // Load device role
     
     // Restore window geometry
     restoreGeometry(m_settings->value(Constants::SettingsKeys::WINDOW_GEOMETRY).toByteArray());
@@ -557,7 +651,14 @@ void GlideMainWindow::showSettingsDialog()
 {
     SettingsDialog settingsDialog(m_settings, this);
     connect(&settingsDialog, &SettingsDialog::languageChanged, this, &GlideMainWindow::handleLanguageChange);
+    connect(&settingsDialog, &QDialog::accepted, this, &GlideMainWindow::onSettingsDialogAccepted); // Connect accepted signal
     settingsDialog.exec(); // Show the dialog modally
+}
+
+void GlideMainWindow::onSettingsDialogAccepted()
+{
+    loadSettings(); // Reload settings after dialog is accepted
+    updateUIBasedOnRole(); // Update UI based on new settings
 }
 
 void GlideMainWindow::retranslateUi()
@@ -594,6 +695,25 @@ void GlideMainWindow::retranslateUi()
     // or iterating through all children and calling retranslateUi on them.
 }
 
+void GlideMainWindow::updateUIBasedOnRole()
+{
+    if (m_deviceRole == "Server") {
+        m_serverGroup->setEnabled(true);
+        m_clientGroup->setEnabled(false);
+        m_fileTransferGroup->setEnabled(true); // Server can also initiate file transfers
+        logMessage(tr("Application set to Server mode."));
+        // Optionally start server automatically
+        // startServer(); 
+    } else { // Client mode
+        m_serverGroup->setEnabled(false);
+        m_clientGroup->setEnabled(true);
+        m_fileTransferGroup->setEnabled(true); // Client can also initiate file transfers
+        logMessage(tr("Application set to Client mode."));
+        // Optionally connect to server automatically
+        // connectToServer();
+    }
+}
+
 void GlideMainWindow::handleLanguageChange(const QString& langCode)
 {
     logMessage(tr("Language changed to: %1").arg(langCode), QString::fromStdString(Constants::LogTypes::INFO));
@@ -617,4 +737,317 @@ void GlideMainWindow::handleLanguageChange(const QString& langCode)
 
     // Retranslate the UI
     retranslateUi();
+}
+
+void GlideMainWindow::setupDeviceDiscoveryGroupUI(QHBoxLayout* mainLayout)
+{
+    m_deviceDiscoveryGroup = new QGroupBox(tr("🔍 Device Discovery"), this);
+    m_deviceDiscoveryGroup->setStyleSheet("QGroupBox { font-weight: bold; font-size: 14px; }");
+    QVBoxLayout* discoveryLayout = new QVBoxLayout(m_deviceDiscoveryGroup);
+
+    // Status label
+    m_discoveryStatusLabel = new QLabel(tr("Ready to discover devices"), this);
+    discoveryLayout->addWidget(m_discoveryStatusLabel);
+
+    // Device list
+    m_discoveredDevicesList = new QListWidget(this);
+    m_discoveredDevicesList->setMaximumHeight(150);
+    m_discoveredDevicesList->setMinimumHeight(100);
+    discoveryLayout->addWidget(m_discoveredDevicesList);
+
+    // Buttons
+    QHBoxLayout* buttonLayout = new QHBoxLayout();
+
+    m_discoverDevicesBtn = new QPushButton(tr("Discover Devices"));
+    m_discoverDevicesBtn->setStyleSheet("QPushButton { background-color: #9C27B0; color: white; font-weight: bold; padding: 8px; }");
+    connect(m_discoverDevicesBtn, &QPushButton::clicked, this, &GlideMainWindow::startDeviceDiscovery);
+    buttonLayout->addWidget(m_discoverDevicesBtn);
+
+    m_connectionWizardBtn = new QPushButton(tr("Connection Wizard"));
+    m_connectionWizardBtn->setStyleSheet("QPushButton { background-color: #607D8B; color: white; font-weight: bold; padding: 8px; }");
+    connect(m_connectionWizardBtn, &QPushButton::clicked, this, &GlideMainWindow::showConnectionWizard);
+    buttonLayout->addWidget(m_connectionWizardBtn);
+
+    discoveryLayout->addLayout(buttonLayout);
+
+    mainLayout->addWidget(m_deviceDiscoveryGroup);
+
+    // Connect device discovery signals
+    connect(m_deviceDiscovery, &DeviceDiscovery::deviceDiscovered,
+            this, &GlideMainWindow::onDeviceDiscovered);
+    connect(m_deviceDiscovery, &DeviceDiscovery::deviceLost,
+            this, &GlideMainWindow::onDeviceLost);
+}
+
+void GlideMainWindow::onDeviceDiscovered(const DiscoveredDevice& device)
+{
+    logMessage(tr("Discovered device: %1 at %2").arg(device.name).arg(device.ipAddress),
+               QString::fromStdString(Constants::LogTypes::INFO));
+
+    // Add to list if not already present
+    for (int i = 0; i < m_discoveredDevicesList->count(); ++i) {
+        QListWidgetItem* item = m_discoveredDevicesList->item(i);
+        DiscoveredDevice existingDevice = item->data(Qt::UserRole).value<DiscoveredDevice>();
+        if (existingDevice.ipAddress == device.ipAddress) {
+            // Update existing item
+            item->setText(QString("%1 (%2) - %3").arg(device.name).arg(device.ipAddress).arg(device.status));
+            item->setData(Qt::UserRole, QVariant::fromValue(device));
+            return;
+        }
+    }
+
+    // Add new item
+    QListWidgetItem* item = new QListWidgetItem(m_discoveredDevicesList);
+    item->setText(QString("%1 (%2) - %3").arg(device.name).arg(device.ipAddress).arg(device.status));
+    item->setData(Qt::UserRole, QVariant::fromValue(device));
+    item->setIcon(QApplication::style()->standardIcon(QStyle::SP_ComputerIcon));
+}
+
+void GlideMainWindow::onDeviceLost(const QString& ipAddress)
+{
+    logMessage(tr("Device lost: %1").arg(ipAddress), QString::fromStdString(Constants::LogTypes::WARNING));
+
+    // Remove from list
+    for (int i = 0; i < m_discoveredDevicesList->count(); ++i) {
+        QListWidgetItem* item = m_discoveredDevicesList->item(i);
+        DiscoveredDevice device = item->data(Qt::UserRole).value<DiscoveredDevice>();
+        if (device.ipAddress == ipAddress) {
+            delete m_discoveredDevicesList->takeItem(i);
+            break;
+        }
+    }
+}
+
+void GlideMainWindow::showConnectionWizard()
+{
+    ConnectionWizard wizard(this);
+    wizard.exec();
+}
+
+void GlideMainWindow::startDeviceDiscovery()
+{
+    logMessage(tr("Starting device discovery..."), QString::fromStdString(Constants::LogTypes::INFO));
+
+    m_discoverDevicesBtn->setEnabled(false);
+    m_discoverDevicesBtn->setText(tr("Discovering..."));
+    m_discoveryStatusLabel->setText(tr("Discovering devices on network..."));
+
+    m_deviceDiscovery->startDiscovery();
+
+    // Re-enable button after discovery
+    QTimer::singleShot(6000, this, [this]() {
+        m_discoverDevicesBtn->setEnabled(true);
+        m_discoverDevicesBtn->setText(tr("Discover Devices"));
+        m_discoveryStatusLabel->setText(tr("Discovery complete"));
+    });
+}
+
+void GlideMainWindow::stopDeviceDiscovery()
+{
+    m_deviceDiscovery->stopDiscovery();
+    logMessage(tr("Device discovery stopped"), QString::fromStdString(Constants::LogTypes::INFO));
+}
+
+// Enhanced File Transfer Methods
+void GlideMainWindow::setupTransferProgressUI(QVBoxLayout* parentLayout)
+{
+    // Progress group
+    QGroupBox* progressGroup = new QGroupBox(tr("Transfer Progress"));
+    progressGroup->setStyleSheet("QGroupBox { font-weight: bold; font-size: 12px; }");
+    QVBoxLayout* progressLayout = new QVBoxLayout(progressGroup);
+
+    // Progress bar
+    m_transferProgressBar = new QProgressBar();
+    m_transferProgressBar->setRange(0, 100);
+    m_transferProgressBar->setValue(0);
+    m_transferProgressBar->setVisible(false);
+    progressLayout->addWidget(m_transferProgressBar);
+
+    // Progress details
+    QHBoxLayout* detailsLayout = new QHBoxLayout();
+    m_speedLabel = new QLabel(tr("Speed: -"));
+    m_etaLabel = new QLabel(tr("ETA: -"));
+    detailsLayout->addWidget(m_speedLabel);
+    detailsLayout->addWidget(m_etaLabel);
+    progressLayout->addLayout(detailsLayout);
+
+    parentLayout->addWidget(progressGroup);
+}
+
+void GlideMainWindow::sendFileEnhanced()
+{
+    QString serverIP = m_serverIPEdit->text().trimmed();
+    if (serverIP.isEmpty()) {
+        QMessageBox::warning(this, tr("Warning"), tr("Please enter a server IP address in the Client Mode section before sending a file!"));
+        return;
+    }
+
+    QString filePath = m_filePathEdit->text().trimmed();
+    if (filePath.isEmpty()) {
+        QMessageBox::warning(this, tr("Warning"), tr("Please select a file to send!"));
+        return;
+    }
+
+    // Get selected transfer mode
+    TransferMode mode = static_cast<TransferMode>(m_transferModeCombo->currentData().toInt());
+
+    // Initialize enhanced transfer manager if needed
+    if (!m_enhancedTransferManager) {
+        m_enhancedTransferManager = new EnhancedFileTransferManager();
+    }
+
+    // Update UI for transfer in progress
+    m_sendFileBtn->setEnabled(false);
+    m_sendFileBtn->setText(tr("Sending..."));
+    m_transferProgressBar->setVisible(true);
+    m_transferProgressBar->setValue(0);
+
+    logMessage(tr("Starting enhanced file transfer: %1 to %2").arg(filePath).arg(serverIP));
+
+    // Enhanced progress callback
+    auto progressCallback = [this](const FileTransferProgress& progress) {
+        QMetaObject::invokeMethod(this, "updateTransferProgress",
+            Qt::QueuedConnection, Q_ARG(FileTransferProgress, progress));
+    };
+
+    // Run transfer in separate thread
+    std::thread([this, serverIP, filePath, mode, progressCallback]() {
+        bool success = m_enhancedTransferManager->sendFileAdvanced(
+            serverIP.toStdString(),
+            filePath.toStdString(),
+            progressCallback,
+            mode,
+            true, // enable encryption
+            3    // max retries
+        );
+
+        QMetaObject::invokeMethod(this, "onTransferFinished",
+            Qt::QueuedConnection, Q_ARG(bool, success), Q_ARG(QString, filePath));
+    }).detach();
+}
+
+void GlideMainWindow::updateTransferProgress(const FileTransferProgress& progress)
+{
+    m_transferProgressBar->setValue(progress.percentage);
+    m_speedLabel->setText(tr("Speed: %1 KB/s").arg(progress.bytesPerSecond / 1024));
+
+    if (progress.percentage > 0 && progress.percentage < 100) {
+        // Calculate ETA
+        int etaSeconds = (100 - progress.percentage) * progress.fileSize / progress.bytesPerSecond / 100;
+        QString etaText = etaSeconds > 60 ?
+            tr("%1m %2s").arg(etaSeconds / 60).arg(etaSeconds % 60) :
+            tr("%1s").arg(etaSeconds);
+        m_etaLabel->setText(tr("ETA: %1").arg(etaText));
+    } else {
+        m_etaLabel->setText(tr("ETA: -"));
+    }
+
+    if (progress.isComplete) {
+        m_transferProgressBar->setValue(100);
+        m_etaLabel->setText(tr("Complete"));
+    }
+}
+
+void GlideMainWindow::onTransferFinished(bool success, const QString& filePath)
+{
+    m_sendFileBtn->setEnabled(true);
+    m_sendFileBtn->setText(tr("🚀 Send File"));
+
+    if (success) {
+        logMessage(tr("File transfer completed successfully: %1").arg(filePath),
+                   QString::fromStdString(Constants::LogTypes::SUCCESS));
+        QMessageBox::information(this, tr("Success"),
+            tr("File sent successfully!\n%1").arg(filePath));
+    } else {
+        logMessage(tr("File transfer failed: %1").arg(filePath),
+                   QString::fromStdString(Constants::LogTypes::ERROR));
+        QMessageBox::critical(this, tr("Error"),
+            tr("File transfer failed!\n%1").arg(filePath));
+    }
+}
+
+void GlideMainWindow::analyzeNetwork()
+{
+    QString serverIP = m_serverIPEdit->text().trimmed();
+    if (serverIP.isEmpty()) {
+        QMessageBox::warning(this, tr("Warning"), tr("Please enter a server IP address first!"));
+        return;
+    }
+
+    m_analyzeNetworkBtn->setEnabled(false);
+    m_analyzeNetworkBtn->setText(tr("Analyzing..."));
+    m_networkStatusLabel->setText(tr("Analyzing network..."));
+
+    logMessage(tr("Analyzing network conditions to %1...").arg(serverIP));
+
+    // Run analysis in separate thread
+    std::thread([this, serverIP]() {
+        if (!m_enhancedTransferManager) {
+            m_enhancedTransferManager = new EnhancedFileTransferManager();
+        }
+
+        NetworkConditions conditions = m_enhancedTransferManager->analyzeNetworkConditions(
+            serverIP.toStdString());
+
+        QMetaObject::invokeMethod(this, "onNetworkAnalysisComplete",
+            Qt::QueuedConnection, Q_ARG(NetworkConditions, conditions));
+    }).detach();
+}
+
+void GlideMainWindow::onNetworkAnalysisComplete(const NetworkConditions& conditions)
+{
+    m_analyzeNetworkBtn->setEnabled(true);
+    m_analyzeNetworkBtn->setText(tr("Analyze Network"));
+
+    QString statusText = tr("Network: %1").arg(QString::fromStdString(conditions.to_string()));
+    m_networkStatusLabel->setText(statusText);
+
+    // Color code based on network quality
+    QString color = "green";
+    if (conditions.is_congested) color = "red";
+    else if (conditions.packet_loss_percent > 2) color = "orange";
+
+    m_networkStatusLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(color));
+
+    logMessage(tr("Network analysis complete: %1").arg(statusText));
+
+    // Update transfer mode recommendation
+    updateTransferModeRecommendation(conditions);
+}
+
+void GlideMainWindow::updateTransferModeRecommendation(const NetworkConditions& conditions)
+{
+    // Auto-select optimal transfer mode
+    if (conditions.bandwidth_mbps > 10.0 && !conditions.is_congested) {
+        m_transferModeCombo->setCurrentIndex(3); // Parallel TCP
+        logMessage(tr("Recommended: Parallel TCP for high bandwidth"));
+    } else if (conditions.latency_ms < 50.0 && conditions.packet_loss_percent < 2) {
+        m_transferModeCombo->setCurrentIndex(2); // UDP Accelerated
+        logMessage(tr("Recommended: UDP Accelerated for low latency"));
+    } else {
+        m_transferModeCombo->setCurrentIndex(1); // Standard TCP
+        logMessage(tr("Recommended: Standard TCP for reliability"));
+    }
+}
+
+// Update transfer statistics display
+void GlideMainWindow::updateTransferStats()
+{
+    if (!m_enhancedTransferManager) return;
+
+    // This is a placeholder - in a full implementation, we would get real stats
+    logMessage(tr("Transfer statistics updated"));
+}
+
+// Cancel current transfer
+void GlideMainWindow::cancelTransfer()
+{
+    if (m_enhancedTransferManager) {
+        m_enhancedTransferManager->cancelTransfer();
+        logMessage(tr("Transfer cancelled by user"));
+    }
+
+    m_sendFileBtn->setEnabled(true);
+    m_sendFileBtn->setText(tr("🚀 Send File"));
+    m_transferProgressBar->setVisible(false);
 }

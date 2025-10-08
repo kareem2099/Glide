@@ -16,6 +16,9 @@ namespace FileTransferServer {
 #else
     void handle_file_transfer_server_linux();
 #endif
+
+    // Enhanced file transfer server function
+    void start_enhanced_file_transfer_server();
 } // namespace FileTransferServer
 
 #endif // FILE_TRANSFER_SERVER_H

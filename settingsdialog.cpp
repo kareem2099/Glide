@@ -39,6 +39,7 @@ void SettingsDialog::setupUI()
     setupGeneralTab();
     setupNetworkingTab();
     setupLoggingTab();
+    setupDeviceRoleGroupUI(static_cast<QVBoxLayout*>(m_tabWidget->widget(0)->layout())); // Add to General tab
 
     mainLayout->addWidget(m_tabWidget);
 
@@ -89,6 +90,18 @@ void SettingsDialog::setupGeneralTab()
     generalLayout->addStretch(); // Push content to top
 
     m_tabWidget->addTab(generalTab, tr("General"));
+}
+
+void SettingsDialog::setupDeviceRoleGroupUI(QVBoxLayout* parentLayout)
+{
+    QGroupBox* deviceRoleGroup = new QGroupBox(tr("Device Role"), this);
+    QHBoxLayout* deviceRoleLayout = new QHBoxLayout(deviceRoleGroup);
+    m_deviceRoleComboBox = new QComboBox(deviceRoleGroup);
+    m_deviceRoleComboBox->addItem(tr("Server"), "Server");
+    m_deviceRoleComboBox->addItem(tr("Client"), "Client");
+    deviceRoleLayout->addWidget(new QLabel(tr("Select Role:")));
+    deviceRoleLayout->addWidget(m_deviceRoleComboBox);
+    parentLayout->addWidget(deviceRoleGroup);
 }
 
 void SettingsDialog::setupNetworkingTab()
@@ -163,6 +176,7 @@ void SettingsDialog::loadSettings()
     m_minimizeToTrayCheckBox->setChecked(m_settings->value(Constants::SettingsKeys::MINIMIZE_TO_TRAY, false).toBool());
     m_hideOnStartupCheckBox->setChecked(m_settings->value(Constants::SettingsKeys::HIDE_ON_STARTUP, false).toBool());
     m_startGlideOnStartupCheckBox->setChecked(m_settings->value(Constants::SettingsKeys::START_ON_STARTUP, false).toBool());
+    m_deviceRoleComboBox->setCurrentIndex(m_deviceRoleComboBox->findData(m_settings->value(Constants::SettingsKeys::DEVICE_ROLE, "Client").toString()));
 
     // Networking Tab
     m_portSpinBox->setValue(m_settings->value(Constants::SettingsKeys::NETWORK_PORT, Constants::DEFAULT_UDP_PORT).toInt());
@@ -183,6 +197,7 @@ void SettingsDialog::saveSettings()
     m_settings->setValue(Constants::SettingsKeys::MINIMIZE_TO_TRAY, m_minimizeToTrayCheckBox->isChecked());
     m_settings->setValue(Constants::SettingsKeys::HIDE_ON_STARTUP, m_hideOnStartupCheckBox->isChecked());
     m_settings->setValue(Constants::SettingsKeys::START_ON_STARTUP, m_startGlideOnStartupCheckBox->isChecked());
+    m_settings->setValue(Constants::SettingsKeys::DEVICE_ROLE, m_deviceRoleComboBox->currentData().toString());
 
     // Networking Tab
     m_settings->setValue(Constants::SettingsKeys::NETWORK_PORT, m_portSpinBox->value());

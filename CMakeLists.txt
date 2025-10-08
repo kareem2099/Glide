@@ -4,10 +4,46 @@ project(GlideApp CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find Qt6 (or Qt5 if preferred)
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
-if(NOT Qt6_FOUND)
-    find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
+# vcpkg integration - Check for vcpkg toolchain
+if(DEFINED ENV{VCPKG_ROOT} OR DEFINED VCPKG_ROOT)
+    set(VCPKG_ROOT $ENV{VCPKG_ROOT})
+    if(NOT VCPKG_ROOT)
+        set(VCPKG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg")
+    endif()
+
+    # Check if vcpkg toolchain file exists
+    if(EXISTS "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "vcpkg toolchain file")
+        message(STATUS "Using vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
+    else()
+        message(WARNING "vcpkg toolchain file not found at ${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+        message(STATUS "Falling back to system package manager")
+    endif()
+endif()
+
+# Option to force vcpkg usage
+option(USE_VCPKG "Use vcpkg for dependency management" OFF)
+
+# If vcpkg is forced or available, use it
+if(USE_VCPKG OR DEFINED CMAKE_TOOLCHAIN_FILE)
+    if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+        message(FATAL_ERROR "vcpkg requested but toolchain file not found. Please install vcpkg or set VCPKG_ROOT environment variable.")
+    endif()
+endif()
+
+# Find Qt6 (or Qt5 if preferred) - Support both vcpkg and system packages
+if(DEFINED CMAKE_TOOLCHAIN_FILE)
+    # Using vcpkg - find packages from vcpkg
+    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
+    if(NOT Qt6_FOUND)
+        find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
+    endif()
+else()
+    # Using system package manager - find packages from system
+    find_package(Qt6 QUIET COMPONENTS Core Widgets Network LinguistTools)
+    if(NOT Qt6_FOUND)
+        find_package(Qt5 REQUIRED COMPONENTS Core Widgets Network LinguistTools)
+    endif()
 endif()
 
 # Enable Qt's MOC (Meta-Object Compiler)
@@ -16,16 +52,22 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 # Add executables
-add_executable(server server.cpp file_transfer_server.cpp)
-add_executable(client client.cpp)
-add_executable(glide_gui 
-    mainwindow.cpp 
+add_executable(server server.cpp file_transfer_server.cpp file_transfer.cpp encryption_manager.cpp server_input_capture.cpp utils.cpp)
+add_executable(client client.cpp encryption_manager.cpp client_input_injection.cpp utils.cpp)
+add_executable(glide_gui
+    mainwindow.cpp
     main.cpp
     resources.qrc
     file_transfer.cpp
+    file_transfer_improvements.cpp
     constants.h
     settingsdialog.cpp
+    clipboard_sync_manager.cpp
+    device_discovery.cpp
+    connectionwizard.cpp
 )
+add_executable(test_enhanced_transfer test_enhanced_transfer.cpp file_transfer.cpp file_transfer_server.cpp)
+add_executable(test_improved_transfer test_improved_transfer.cpp file_transfer.cpp file_transfer_server.cpp file_transfer_improvements.cpp)
 
 # Add translations for glide_gui
 set(TS_FILES
@@ -62,11 +104,20 @@ endforeach()
 add_custom_target(generate_qm_files ALL DEPENDS ${QM_FILES})
 add_dependencies(glide_gui generate_qm_files)
 
+# Find OpenSSL for encryption - Support both vcpkg and system packages
+if(DEFINED CMAKE_TOOLCHAIN_FILE)
+    # Using vcpkg - find packages from vcpkg
+    find_package(OpenSSL REQUIRED)
+else()
+    # Using system package manager - find packages from system
+    find_package(OpenSSL REQUIRED)
+endif()
+
 # Link Qt libraries to GUI
 if(Qt6_FOUND)
-    target_link_libraries(glide_gui Qt6::Core Qt6::Widgets Qt6::Network)
+    target_link_libraries(glide_gui Qt6::Core Qt6::Widgets Qt6::Network OpenSSL::SSL OpenSSL::Crypto z)
 else()
-    target_link_libraries(Glide_gui Qt5::Core Qt5::Widgets Qt5::Network)
+    target_link_libraries(Glide_gui Qt5::Core Qt5::Widgets Qt5::Network OpenSSL::SSL OpenSSL::Crypto z)
 endif()
 
 if(WIN32)
@@ -83,36 +134,66 @@ if(WIN32)
     target_link_libraries(glide_gui user32 shell32 ws2_32)
     
 else()
-    # Linux/Unix - Find packages properly
+    # Linux/Unix - Support both vcpkg and system packages
     target_link_libraries(glide_gui pthread)
-    find_package(X11 REQUIRED)
-    find_package(PkgConfig REQUIRED)
-    
-    # Use pkg-config to find XTest
-    pkg_check_modules(XTST REQUIRED xtst)
-    
+
+    if(DEFINED CMAKE_TOOLCHAIN_FILE)
+        # Using vcpkg - find packages from vcpkg
+        find_package(X11 REQUIRED)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(XTST REQUIRED xtst)
+    else()
+        # Using system package manager - find packages from system
+        find_package(X11 REQUIRED)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(XTST REQUIRED xtst)
+    endif()
+
     # Server links (usually doesn't need XTest for input capture)
-    target_link_libraries(server 
+    target_link_libraries(server
         ${X11_LIBRARIES}
         pthread
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        z
     )
-    
+
     # Client links (needs XTest for input injection)
-    target_link_libraries(client 
+    target_link_libraries(client
         ${X11_LIBRARIES}
         ${XTST_LIBRARIES}
         pthread
+        OpenSSL::SSL
+        OpenSSL::Crypto
     )
-    
+
     # Add include directories
     target_include_directories(server PRIVATE ${X11_INCLUDE_DIR})
-    target_include_directories(client PRIVATE 
+    target_include_directories(client PRIVATE
         ${X11_INCLUDE_DIR}
         ${XTST_INCLUDE_DIRS}
     )
-    
+
     # Add compile flags from pkg-config
     target_compile_options(client PRIVATE ${XTST_CFLAGS_OTHER})
+
+    # Test program links
+    target_link_libraries(test_enhanced_transfer
+        ${X11_LIBRARIES}
+        pthread
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        z
+    )
+
+    # Improved test program links
+    target_link_libraries(test_improved_transfer
+        ${X11_LIBRARIES}
+        pthread
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        z
+    )
 endif()
 
 # Add debug information
